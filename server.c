@@ -38,13 +38,14 @@ void handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
     // Send acknowledgment for the initial request
     char ack_packet[4] = {0, 4, 0, 0};
     sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-
+    printf("ack is sent\n");
     // Receive data and write to the file
     unsigned short block_number = 1;
     char buffer[MAX_BUFFER_SIZE];
     size_t bytes_received;
 
     do {
+        printf("i am here\n");
         // Receive data packet
         bytes_received = recvfrom(sockfd, buffer, sizeof(buffer), 0, NULL, NULL);
         if (bytes_received < 0) {
@@ -55,6 +56,7 @@ void handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
         // Check opcode
         unsigned short opcode = ntohs(*(unsigned short *)buffer);
         if (opcode != 3) {
+            printf("Illegal TFTP operation opcode is != 3\n");
             send_error(sockfd, client_addr, 4, "Illegal TFTP operation");
             break;
         }
@@ -62,23 +64,28 @@ void handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
         // Check block number
         unsigned short received_block_number = ntohs(*(unsigned short *)(buffer + 2));
         if (received_block_number != block_number) {
+            printf("Illegal TFTP operation opcode is block numbers are different\n");
             send_error(sockfd, client_addr, 4, "Illegal TFTP operation");
             break;
         }
+        printf("Received Data:\n");
+        for (size_t i = 0; i < bytes_received; ++i) {
+            printf("%02X ", (unsigned char)buffer[i]);
+        }
+        printf("\n");
 
         // Write data to the file
         fwrite(buffer + 4, 1, bytes_received - 4, file);
 
-        // Increment block number
-        block_number++;
 
         // Send acknowledgment
         ack_packet[2] = (block_number >> 8) & 0xFF;
         ack_packet[3] = block_number & 0xFF;
         sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+        block_number++;
     } while (bytes_received == 516);
 
-    // Close the file
+    //Close the file
     fclose(file);
 }
 
@@ -128,6 +135,8 @@ int run_server(int port) {
                 handle_rrq(sockfd, client_addr, filename);
                 break;
             case 2:  // WRQ
+                printf("wrq parsed\n");
+                printf("filename is %s\n",filename);
                 handle_wrq(sockfd, client_addr, filename);
                 break;
             default:
