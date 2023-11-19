@@ -2,10 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <getopt.h>
+#include <time.h>
 #include <arpa/inet.h> 
 
 #define DEFAULT_PORT 69
 #define MAX_BUFFER_SIZE 516
+#define TIMEOUT_SECONDS 3
 
 
 void send_error(int sockfd, struct sockaddr_in client_addr, unsigned short error_code, const char *error_msg) {
@@ -23,12 +26,94 @@ void send_error(int sockfd, struct sockaddr_in client_addr, unsigned short error
     sendto(sockfd, buffer, strlen(error_msg) + 5, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
 }
 
+int get_data_block(char* buffer, int block_number, char* filename) {
+    FILE *file = fopen(filename, "rb");
+    if (file == NULL) {
+        perror("Error opening file");
+        return -1;
+    }
+
+    // Seek to the appropriate position based on block_number
+    fseek(file, (block_number - 1) * 512, SEEK_SET);
+
+    // Read data from the file
+    size_t bytesRead = fread(buffer + 4, 1, 512, file);
+
+    fclose(file);
+
+    if (bytesRead == 0) {
+        // No more data to read, return 0 to signal end of file
+        return 0;
+    }
+
+    // Set opcode for data (3)
+    *(unsigned short *)buffer = htons(3);
+
+    // Set block number
+    *(unsigned short *)(buffer + 2) = htons(block_number);
+
+    // Return the total size of the data block (header + data)
+    return bytesRead + 4;
+}
+
+
+int recive_ack(int sockfd, struct sockaddr_in client_addr, int block_number){
+    socklen_t client_len = sizeof(client_addr);
+    char ack_buffer[MAX_BUFFER_SIZE];
+    ssize_t ack_size;
+    time_t start_time = time(NULL);
+    time_t current_time;
+    while (1) {
+        // Check if the timeout has occurred
+        current_time = time(NULL);
+        if (current_time - start_time >= TIMEOUT_SECONDS) {
+            printf("Timeout occurred. No ACK received.\n");
+            return -1;  // Timeout occurred
+        }
+
+        // Receive ACK packet (non-blocking call)
+        ack_size = recvfrom(sockfd, ack_buffer, sizeof(ack_buffer), MSG_DONTWAIT,
+                            (struct sockaddr *)&client_addr, &client_len);
+
+        if (ack_size > 0) {
+            // Check if ACK packet is correct
+            unsigned short received_block_number = ntohs(*(unsigned short *)(ack_buffer+2));
+            if (received_block_number == block_number) {
+                printf("Block number is correct = %d\n", block_number);
+                // ACK is correct, return 0
+                return 0;
+            } else {
+                // Incorrect ACK, continue waiting for the correct one
+                printf("Block number is not correct = %d %d\n", block_number, received_block_number);
+            }
+        }
+
+        // Sleep for a short duration before checking again
+        usleep(100000);  // 100,000 microseconds (100 milliseconds)
+    }
+}
 
 void handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
-    printf("I have the read request\n");
+    char buffer[MAX_BUFFER_SIZE];
+    memset(buffer, 0, sizeof(buffer));
+
+    int bn = 1;
+    int data_size = get_data_block(buffer, bn, filename);
+
+    printf("data sizr is %d\n",data_size);
+    while(data_size) {
+        sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+        while(recive_ack(sockfd, client_addr,bn)!=0){
+           printf("Again\n");
+           sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+        }
+        bn++;
+        data_size = get_data_block(buffer, bn, filename);
+    }
 }
 
 void handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
+    
     FILE *file = fopen(filename, "wb");
     if (file == NULL) {
         send_error(sockfd, client_addr, 2, "Access violation");
@@ -68,11 +153,11 @@ void handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
             send_error(sockfd, client_addr, 4, "Illegal TFTP operation");
             break;
         }
-        printf("Received Data:\n");
-        for (size_t i = 0; i < bytes_received; ++i) {
-            printf("%02X ", (unsigned char)buffer[i]);
-        }
-        printf("\n");
+        // printf("Received Data:\n");
+        // for (size_t i = 0; i < bytes_received; ++i) {
+        //     printf("%02X ", (unsigned char)buffer[i]);
+        // }
+        // printf("\n");
 
         // Write data to the file
         fwrite(buffer + 4, 1, bytes_received - 4, file);
@@ -83,7 +168,7 @@ void handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
         ack_packet[3] = block_number & 0xFF;
         sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
         block_number++;
-    } while (bytes_received == 516);
+    } while (bytes_received == MAX_BUFFER_SIZE);
 
     //Close the file
     fclose(file);
@@ -114,7 +199,7 @@ int run_server(int port) {
         close(sockfd);
         exit(EXIT_FAILURE);
     }
-    int i = 1;
+    int i = 5;
     while (i != 0) {
         // Receive TFTP request
         memset(buffer, 0, sizeof(buffer));
@@ -132,6 +217,7 @@ int run_server(int port) {
         // Handle TFTP request based on opcode
         switch (opcode) {
             case 1:  // RRQ
+                printf("rrq parsed\n");
                 handle_rrq(sockfd, client_addr, filename);
                 break;
             case 2:  // WRQ
