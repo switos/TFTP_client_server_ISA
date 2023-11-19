@@ -10,7 +10,7 @@
 
 #define DEFAULT_PORT 69
 #define MAX_BUFFER_SIZE 516
-#define TIMEOUT_SECONDS 1
+#define TIMEOUT_SECONDS 5
 
 void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int opcode, int block_id) {
     char src_ip[INET_ADDRSTRLEN];
@@ -70,7 +70,8 @@ int set_data_block(char* buffer, int block_number, const char* filename, size_t 
     return 0;
 }
 
-int receive_data(int sockfd, struct sockaddr_in server_addr, struct sockaddr_in local_addr, const char* filename, int block_number, const char* localpath, int* cnt) {
+int receive_data(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in local_addr, const char* filename, int block_number, const char* localpath, int* cnt) {
+    socklen_t server_len = sizeof(*server_addr);
     char buffer[MAX_BUFFER_SIZE];
     ssize_t bytes_received;
     time_t start_time = time(NULL);
@@ -85,12 +86,12 @@ int receive_data(int sockfd, struct sockaddr_in server_addr, struct sockaddr_in 
             return 2;  // Timeout occurred
         }
 
-        bytes_received = recvfrom(sockfd, buffer, sizeof(buffer), MSG_DONTWAIT, NULL, NULL);
+        bytes_received = recvfrom(sockfd, buffer, sizeof(buffer), MSG_DONTWAIT, (struct sockaddr *)server_addr, &server_len);
         
         //printf("bytes recived: %ld\n", bytes_received);
         if (bytes_received > 0) {
             unsigned short opcode = ntohs(*(unsigned short *)buffer);
-            print_message(&server_addr, &local_addr, opcode, block_number);
+            print_message(server_addr, &local_addr, opcode, block_number);
             if (opcode != 3) {
                 if (opcode == 5) {
                     printf("Error package has arrived");
@@ -126,9 +127,9 @@ int receive_data(int sockfd, struct sockaddr_in server_addr, struct sockaddr_in 
 
 }
 
-int recive_ack(int sockfd, struct sockaddr_in server_addr, struct sockaddr_in local_addr, int block_number, int* cnt){
+int recive_ack(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in local_addr, int block_number, int* cnt){
 
-    socklen_t server_len = sizeof(server_addr);
+    socklen_t server_len = sizeof(*server_addr);
     char ack_buffer[MAX_BUFFER_SIZE];
     ssize_t ack_size;
     time_t start_time = time(NULL);
@@ -144,12 +145,12 @@ int recive_ack(int sockfd, struct sockaddr_in server_addr, struct sockaddr_in lo
 
         // Receive ACK packet (non-blocking call)
         ack_size = recvfrom(sockfd, ack_buffer, sizeof(ack_buffer), MSG_DONTWAIT,
-                            (struct sockaddr *)&server_addr, &server_len);
+                            (struct sockaddr *)server_addr, &server_len);
 
         if (ack_size > 0) {
             // Check if the received packet is an ACK
             unsigned short opcode = ntohs(*(unsigned short *)ack_buffer);
-            print_message(&server_addr, &local_addr, opcode, block_number);
+            print_message(server_addr, &local_addr, opcode, block_number);
             if (opcode == 4) {
                 // Check if ACK packet is correct
                 unsigned short received_block_number = ntohs(*(unsigned short *)(ack_buffer + 2));
@@ -207,7 +208,7 @@ int send_rrq(int sockfd, struct sockaddr_in server_addr, const char *filename, c
             printf("Timeout has occurred, cannot recive DATA from server\n");
             return 1;
         }
-        int received_data = receive_data(sockfd, server_addr, local_addr, filename, bn, localpath, &cnt);
+        int received_data = receive_data(sockfd, &server_addr, local_addr, filename, bn, localpath, &cnt);
         if (received_data == 0){
             ack_packet[2] = (bn >> 8) & 0xFF;
             ack_packet[3] = bn & 0xFF;
@@ -272,7 +273,7 @@ int send_wrq(int sockfd, struct sockaddr_in server_addr, const char *filename) {
     }
     int result;
     int cnt = 0;
-    while( (result = recive_ack(sockfd, server_addr, local_addr, 0, &cnt)) != 0 ){
+    while( (result = recive_ack(sockfd, &server_addr, local_addr, 0, &cnt)) != 0 ){
         if( cnt > 3 ) {
             printf("Timeout has occurred, cannot recive ACK from server\n");
             return 1;
@@ -287,7 +288,7 @@ int send_wrq(int sockfd, struct sockaddr_in server_addr, const char *filename) {
     printf("data size is %d\n",data_size);
     while(data_size) {
         sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
-        while(recive_ack(sockfd, server_addr, local_addr, bn, &cnt)!=0){
+        while(recive_ack(sockfd, &server_addr, local_addr, bn, &cnt)!=0){
         if( cnt > 3 ) {
             printf("Timeout has occurred, cannot recive ACK from server\n");
             return 1;
