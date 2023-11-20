@@ -16,7 +16,7 @@
 
 void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int block_id, char* buffer, const char *opts) {
     char src_ip[INET_ADDRSTRLEN];
-    char dst_ip[INET_ADDRSTRLEN];
+
     inet_ntop(AF_INET, &(src_addr->sin_addr), src_ip, INET_ADDRSTRLEN);
 
     // Get the source and destination ports
@@ -30,7 +30,7 @@ void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in 
     switch (opcode) {
         case 1:  // RRQ
         case 2:  // WRQ
-            fprintf(stderr, "%s %s:%d \"%s\" %s %s\n", (opcode == 1) ? "RRQ" : "WRQ", src_ip, src_port, filename, mode, opts);
+            fprintf(stderr, "%s %s:%d \"%s\" %s\n", (opcode == 1) ? "RRQ" : "WRQ", src_ip, src_port, filename, mode);
             break;
         case 3:  // DATA
             fprintf(stderr, "DATA %s:%d:%d %d\n", src_ip, src_port, dst_port, block_id);
@@ -40,9 +40,6 @@ void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in 
             break;
         case 5:  // ERROR
             fprintf(stderr, "ERROR %s:%d:%d \"%s\"\n", src_ip, src_port, dst_port, buffer+4);
-            break;
-        case 6:  // OACK
-            fprintf(stderr, "OACK %s:%d %s\n", src_ip, src_port, opts);
             break;
     }
 }
@@ -118,21 +115,14 @@ int recive_ack(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in se
                 // Check if ACK packet is correct
                 unsigned short received_block_number = ntohs(*(unsigned short *)(ack_buffer + 2));
                 if (received_block_number == block_number) {
-                    printf("Block number is correct = %d\n", block_number);
                     // ACK is correct, return 0
-                    (*cnt) == 0;
+                    (*cnt) = 0;
                     return 0;
                 } else if (opcode == 5) {
                     printf("Error package has arrived");
                     return 5;
-                } else {
-                    // Incorrect ACK, continue waiting for the correct one
-                    printf("Block number is not correct = %d %d\n", block_number, received_block_number);
                 }
-            } else {
-                // The received packet is not an ACK, continue waiting
-                printf("Received packet is not an ACK (opcode = %d)\n", opcode);
-            }
+            } 
         }
 
         // Sleep for a short duration before checking again
@@ -157,7 +147,7 @@ int handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool 
     
     while(data_size) {
         sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-        while(result = recive_ack(sockfd, client_addr, server_addr, bn, &cnt, TIMEOUT_SECONDS)!=0){
+        while((result = recive_ack(sockfd, client_addr, server_addr, bn, &cnt, TIMEOUT_SECONDS))!=0){
             if( cnt > 3 ) {
                 printf("Timeout has occurred, cannot recive ACK from server, terminate communication\n");
                 return 1;
@@ -173,7 +163,7 @@ int handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool 
 }
 
 int set_data_block(int sockfd, struct sockaddr_in client_addr, char* buffer, int block_number, const char* filename, size_t len) {
-    printf("filename is %s\n", filename);
+
 
     FILE *file = fopen(filename, "r+b");  // Try to open the file for reading and writing
 
@@ -189,37 +179,17 @@ int set_data_block(int sockfd, struct sockaddr_in client_addr, char* buffer, int
 
     size_t block_size = 512;
     size_t position = (block_number - 1) * block_size;
-    printf("postition is %ld\n", position);
+  
 
     // Move the file pointer to the appropriate position
     fseek(file, position, SEEK_SET);
-    printf("stlen: %ld\n",strlen(buffer + 4));
-    size_t bytesWritten = fwrite(buffer + 4, 1, len-4, file);
 
-    if (bytesWritten != len-4) {
-        printf("Error writing data to file");
-    } else {
-        printf("Data block %d written to file\n", block_number);
-    }
+    fwrite(buffer + 4, 1, len-4, file);
+
+
 
     fclose(file);
     return 0;
-}
-
-void netascii_to_local(char *data, size_t* length) {
-    for (size_t i = 0; i < (*length); ++i) {
-        // Check for CR LF sequence
-        if (data[i] == '\r' && i + 1 < (*length) && data[i + 1] == '\n') {
-            // Replace CR LF with LF
-            data[i] = '\n';
-
-            // Shift remaining characters to the left
-            memmove(&data[i + 1], &data[i + 2], (*length) - i - 2);
-
-            // Decrease the length
-            --(*length);
-        }
-    }
 }
 
 int receive_data(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in server_addr, const char* filepath, int block_number, int* cnt, int timeout, bool mode) {
@@ -252,10 +222,6 @@ int receive_data(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in 
                 return 2;
             }
             
-            if (mode)
-            {
-                netascii_to_local(buffer, &bytes_received);
-            }
             
             // Check block number
             unsigned short received_block_number = ntohs(*(unsigned short *)(buffer + 2));
@@ -264,7 +230,7 @@ int receive_data(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in 
                 return 2;
             }
             set_data_block(sockfd, client_addr, buffer, block_number, filepath, bytes_received);
-            (*cnt) == 0;
+            (*cnt) = 0;
             if(bytes_received < MAX_BUFFER_SIZE) {
                 return 1;
             } else {
@@ -327,7 +293,8 @@ int handle_queries(int child_sockfd, struct sockaddr_in client_addr, char buffer
     bool mode_flag;
 
     if (strcmp(mode, "netascii") == 0) {
-        mode_flag = true;
+        send_error(child_sockfd, client_addr, 0, "Unsupported mode\n");
+        return 1;
     } else if (strcmp(mode, "octet") == 0) {
         mode_flag = false;
     } else { 
@@ -337,7 +304,7 @@ int handle_queries(int child_sockfd, struct sockaddr_in client_addr, char buffer
 
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "%s/%s", dir, filename);
-    printf("filepath: %s\n", filepath);
+
 
     switch (opcode) {
         case 1:  // RRQ
@@ -361,6 +328,7 @@ int handle_queries(int child_sockfd, struct sockaddr_in client_addr, char buffer
             return 1;
             break;
     }
+    return 0;
 }
 
 int bind_child_socket(int *child_sockfd, int parent_sockfd) {
@@ -384,13 +352,7 @@ int bind_child_socket(int *child_sockfd, int parent_sockfd) {
         return -1;
     }
 
-    // Get the dynamically assigned port
-    socklen_t child_len = sizeof(child_addr);
-    if (getsockname(*child_sockfd, (struct sockaddr *)&child_addr, &child_len) == 0) {
-        printf("Child process dynamically assigned port: %d\n", ntohs(child_addr.sin_port));
-    } else {
-        perror("Error getting dynamically assigned port");
-    }
+
 
     // Close the parent socket in the child process
     close(parent_sockfd);
@@ -429,14 +391,14 @@ int run_server(int port, const char* dir) {
         memset(buffer, 0, sizeof(buffer));
         ssize_t bytes_received = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr *)&client_addr, &client_len);
         if (bytes_received < 0) {
-            perror("Error receiving data");
+            printf("Error receiving data\n");
             continue;
         }
 
         pid_t child_pid = fork();
 
         if (child_pid < 0) {
-            perror("Error forking process");
+            printf("Error forking process\n");
             continue;
         } else if (child_pid == 0) {
             
@@ -453,10 +415,6 @@ int run_server(int port, const char* dir) {
                printf("Error in binding new socket\n");
                exit(EXIT_FAILURE);
             }
-        } else {
-            // This is the parent process
-            // Close the client socket in the parent process
-            printf("Child process spawned\n");
         }
     }
 
@@ -490,17 +448,12 @@ int main(int argc, char *argv[]) {
         root_dirpath = argv[optind];
     }
 
-    // Print parsed arguments
-    printf("Port: %d\n", port);
-    printf("Root Directory Path: %s\n", root_dirpath);
 
     const char* root_dirpath_const = root_dirpath;
 
     DIR *dir = opendir(root_dirpath);
     if (dir == NULL) {
-        if (mkdir(root_dirpath, 0777) == 0) {
-            printf("Success\n"); // Directory created successfully
-        } else {
+        if (mkdir(root_dirpath, 0777) != 0) {
             printf("Error creating directory\n");
             return -1; // Error creating directory
         }
