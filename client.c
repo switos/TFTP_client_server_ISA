@@ -14,7 +14,6 @@
 
 void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int opcode, int block_id, char* e_msg) {
     char src_ip[INET_ADDRSTRLEN];
-    char dst_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(src_addr->sin_addr), src_ip, INET_ADDRSTRLEN);
     
     // Get the source and destination ports
@@ -31,13 +30,10 @@ void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in 
         case 5:
             fprintf(stderr, "ERROR %s:%d:%d \"%s\"\n", src_ip, src_port, dst_port, e_msg+4);
             break;
-        default:
-            fprintf(stderr, "Unknown opcode %d\n", opcode);
     }
 }
 
 int set_data_block(char* buffer, int block_number, const char* filename, size_t len) {
-    printf("filename is %s\n", filename);
 
     FILE *file = fopen(filename, "r+b");  // Try to open the file for reading and writing
 
@@ -53,18 +49,14 @@ int set_data_block(char* buffer, int block_number, const char* filename, size_t 
 
     size_t block_size = 512;
     size_t position = (block_number - 1) * block_size;
-    printf("postition is %ld\n", position);
+
 
     // Move the file pointer to the appropriate position
     fseek(file, position, SEEK_SET);
-    printf("stlen: %ld\n",strlen(buffer + 4));
-    size_t bytesWritten = fwrite(buffer + 4, 1, len-4, file);
 
-    if (bytesWritten != len-4) {
-        printf("Error writing data to file");
-    } else {
-        printf("Data block %d written to file\n", block_number);
-    }
+    fwrite(buffer + 4, 1, len-4, file);
+
+
 
     fclose(file);
     return 0;
@@ -88,7 +80,6 @@ int receive_data(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in
 
         bytes_received = recvfrom(sockfd, buffer, sizeof(buffer), MSG_DONTWAIT, (struct sockaddr *)server_addr, &server_len);
         
-        //printf("bytes recived: %ld\n", bytes_received);
         if (bytes_received > 0) {
             unsigned short opcode = ntohs(*(unsigned short *)buffer);
             print_message(server_addr, &local_addr, opcode, block_number, buffer);
@@ -107,14 +98,10 @@ int receive_data(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in
                 printf("Received unexpected block number: %d\n", received_block_number);
                 return 2;
             }
-            // printf("Received Data:\n");
-            // for (size_t i = 0; i < bytes_received; ++i) {
-            //     printf("%c", buffer[i]);
-            // }
-            // printf("\n");
+
             set_data_block(buffer, block_number, localpath, bytes_received);
-            printf("data_processed\n"); 
-            (*cnt) == 0;
+
+            (*cnt) = 0;
             if(bytes_received < MAX_BUFFER_SIZE) {
                 return 1;
             } else {
@@ -155,20 +142,13 @@ int recive_ack(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in l
                 // Check if ACK packet is correct
                 unsigned short received_block_number = ntohs(*(unsigned short *)(ack_buffer + 2));
                 if (received_block_number == block_number) {
-                    printf("Block number is correct = %d\n", block_number);
                     // ACK is correct, return 0
-                    (*cnt) == 0;
+                    (*cnt) = 0;
                     return 0;
-                } else {
-                    // Incorrect ACK, continue waiting for the correct one
-                    printf("Block number is not correct = %d %d\n", block_number, received_block_number);
-                }
+                } 
             } else if (opcode == 5) {
                     printf("Error package has arrived\n");
                     return 5;
-            } else {
-                // The received packet is not an ACK, continue waiting
-                printf("Received packet is not an ACK (opcode = %d)\n", opcode);
             }
         }
 
@@ -297,7 +277,6 @@ int send_wrq(int sockfd, struct sockaddr_in server_addr, const char *filename) {
 int comunicate(int port, char* address, bool flag, char* filename, char* localpath) {
     int sockfd;
     struct sockaddr_in server_addr;
-    socklen_t server_len = sizeof(server_addr);
 
     // Create UDP socket
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
