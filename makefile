@@ -6,8 +6,8 @@ KSRCS = server.c
 
 # Default rule
 all: 
-	$(CC) -Wall -o tftp-client $(CSRCS)
-	$(CC) -Wall -o tftp-server $(KSRCS)
+	$(CC) -o tftp-client $(CSRCS)
+	$(CC) -o tftp-server $(KSRCS)
 
 # Clean rule
 clean:
