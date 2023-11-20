@@ -16,7 +16,6 @@
 
 void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int block_id, char* buffer, const char *opts) {
     char src_ip[INET_ADDRSTRLEN];
-    char dst_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(src_addr->sin_addr), src_ip, INET_ADDRSTRLEN);
 
     // Get the source and destination ports
@@ -62,18 +61,19 @@ void send_error(int sockfd, struct sockaddr_in client_addr, unsigned short error
     sendto(sockfd, buffer, strlen(error_msg) + 5, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
 }
 
-int get_data_block(char* buffer, int block_number, char* filename) {
+int get_data_block(int sockfd, struct sockaddr_in client_addr, char* buffer, int block_number, char* filename, int blksz) {
+    
     FILE *file = fopen(filename, "rb");
     if (file == NULL) {
-        perror("Error opening file");
-        return -1;
+        send_error(sockfd, client_addr, 2, "Access violation");
+        return 1;
     }
 
     // Seek to the appropriate position based on block_number
-    fseek(file, (block_number - 1) * 512, SEEK_SET);
+    fseek(file, (block_number - 1) * blksz, SEEK_SET);
 
     // Read data from the file
-    size_t bytesRead = fread(buffer + 4, 1, 512, file);
+    size_t bytesRead = fread(buffer + 4, 1, blksz, file);
 
     fclose(file);
 
@@ -120,7 +120,7 @@ int recive_ack(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in se
                 if (received_block_number == block_number) {
                     printf("Block number is correct = %d\n", block_number);
                     // ACK is correct, return 0
-                    (*cnt) == 0;
+                    (*cnt) = 0;
                     return 0;
                 } else if (opcode == 5) {
                     printf("Error package has arrived");
@@ -140,9 +140,27 @@ int recive_ack(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in se
     }
 }
 
-int handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool mode) {
+void local_to_netascii(char *data, size_t *length) {
+    // Expand LF to CR LF
+    for (size_t i = 0; i < (*length); ++i) {
+        if (data[i] == '\n') {
+            // Shift characters to the right
+            memmove(&data[i + 1], &data[i], (*length) - i);
 
-    char buffer[MAX_BUFFER_SIZE];
+            // Insert CR before LF
+            data[i] = '\r';
+
+            // Increase the length
+            ++(*length);
+            // Move to the next character
+            ++i;
+        }
+    }
+}
+
+int handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool mode, int blksz) {
+
+    char buffer[blksz];
     memset(buffer, 0, sizeof(buffer));
 
     struct sockaddr_in server_addr;
@@ -151,13 +169,19 @@ int handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool 
     getsockname(sockfd, (struct sockaddr *)&server_addr, &server_len);
     
     int bn = 1;
-    int data_size = get_data_block(buffer, bn, filename);
+    size_t data_size = get_data_block(sockfd, client_addr, buffer, bn, filename, MAX_BUFFER_SIZE);
+
+    if (mode) {
+        local_to_netascii(buffer, &data_size);
+    }
+    
+
     int cnt = 0;
     int result;
     
     while(data_size) {
         sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-        while(result = recive_ack(sockfd, client_addr, server_addr, bn, &cnt, TIMEOUT_SECONDS)!=0){
+        while((result = recive_ack(sockfd, client_addr, server_addr, bn, &cnt, TIMEOUT_SECONDS))!=0){
             if( cnt > 3 ) {
                 printf("Timeout has occurred, cannot recive ACK from server, terminate communication\n");
                 return 1;
@@ -167,7 +191,7 @@ int handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool 
             sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
         }
         bn++;
-        data_size = get_data_block(buffer, bn, filename);
+        data_size = get_data_block(sockfd, client_addr, buffer, bn, filename, MAX_BUFFER_SIZE);
     }
     return 0;
 }
@@ -206,8 +230,8 @@ int set_data_block(int sockfd, struct sockaddr_in client_addr, char* buffer, int
     return 0;
 }
 
-void netascii_to_local(char *data, size_t* length) {
-    for (size_t i = 0; i < (*length); ++i) {
+void netascii_to_local(char *data, ssize_t* length) {
+    for (ssize_t i = 0; i < (*length); ++i) {
         // Check for CR LF sequence
         if (data[i] == '\r' && i + 1 < (*length) && data[i + 1] == '\n') {
             // Replace CR LF with LF
@@ -222,9 +246,9 @@ void netascii_to_local(char *data, size_t* length) {
     }
 }
 
-int receive_data(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in server_addr, const char* filepath, int block_number, int* cnt, int timeout, bool mode) {
+int receive_data(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in server_addr, const char* filepath, int block_number, int* cnt, int timeout, bool mode, int blksz) {
     socklen_t clinet_len = sizeof(client_addr);
-    char buffer[MAX_BUFFER_SIZE];
+    char buffer[blksz];
     ssize_t bytes_received;
     time_t start_time = time(NULL);
     time_t current_time;
@@ -252,10 +276,6 @@ int receive_data(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in 
                 return 2;
             }
             
-            if (mode)
-            {
-                netascii_to_local(buffer, &bytes_received);
-            }
             
             // Check block number
             unsigned short received_block_number = ntohs(*(unsigned short *)(buffer + 2));
@@ -264,8 +284,8 @@ int receive_data(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in 
                 return 2;
             }
             set_data_block(sockfd, client_addr, buffer, block_number, filepath, bytes_received);
-            (*cnt) == 0;
-            if(bytes_received < MAX_BUFFER_SIZE) {
+            (*cnt) = 0;
+            if(bytes_received < blksz) {
                 return 1;
             } else {
                 return 0;
@@ -293,7 +313,7 @@ int handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool 
             printf("Timeout has occurred, can not recive DATA from server, terminate communication\n");
             return 1;
         }
-        received_data = receive_data(sockfd, client_addr, local_addr, filename, bn, &cnt, TIMEOUT_SECONDS, mode);
+        received_data = receive_data(sockfd, client_addr, local_addr, filename, bn, &cnt, TIMEOUT_SECONDS, mode, MAX_BUFFER_SIZE);
         if (received_data == 0){ // okay, send next
             ack_packet[2] = (bn >> 8) & 0xFF;
             ack_packet[3] = bn & 0xFF;
@@ -327,7 +347,8 @@ int handle_queries(int child_sockfd, struct sockaddr_in client_addr, char buffer
     bool mode_flag;
 
     if (strcmp(mode, "netascii") == 0) {
-        mode_flag = true;
+        send_error(child_sockfd, client_addr, 0, "Netascii mode is not supported\n");
+        return 1;
     } else if (strcmp(mode, "octet") == 0) {
         mode_flag = false;
     } else { 
@@ -346,7 +367,7 @@ int handle_queries(int child_sockfd, struct sockaddr_in client_addr, char buffer
                 send_error(child_sockfd, client_addr, 2, "File do not exists");
                 return 1;
             }
-            handle_rrq(child_sockfd, client_addr, filepath, mode_flag);
+            handle_rrq(child_sockfd, client_addr, filepath, mode_flag, MAX_BUFFER_SIZE);
             break;
         case 2:  // WRQ
             if (access(filepath, F_OK) == 0) {
@@ -361,6 +382,7 @@ int handle_queries(int child_sockfd, struct sockaddr_in client_addr, char buffer
             return 1;
             break;
     }
+    return 0;
 }
 
 int bind_child_socket(int *child_sockfd, int parent_sockfd) {

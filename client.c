@@ -14,7 +14,6 @@
 
 void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int opcode, int block_id, char* e_msg) {
     char src_ip[INET_ADDRSTRLEN];
-    char dst_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(src_addr->sin_addr), src_ip, INET_ADDRSTRLEN);
     
     // Get the source and destination ports
@@ -114,7 +113,7 @@ int receive_data(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in
             // printf("\n");
             set_data_block(buffer, block_number, localpath, bytes_received);
             printf("data_processed\n"); 
-            (*cnt) == 0;
+            (*cnt) = 0;
             if(bytes_received < MAX_BUFFER_SIZE) {
                 return 1;
             } else {
@@ -157,7 +156,7 @@ int recive_ack(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in l
                 if (received_block_number == block_number) {
                     printf("Block number is correct = %d\n", block_number);
                     // ACK is correct, return 0
-                    (*cnt) == 0;
+                    (*cnt) = 0;
                     return 0;
                 } else {
                     // Incorrect ACK, continue waiting for the correct one
@@ -297,7 +296,6 @@ int send_wrq(int sockfd, struct sockaddr_in server_addr, const char *filename) {
 int comunicate(int port, char* address, bool flag, char* filename, char* localpath) {
     int sockfd;
     struct sockaddr_in server_addr;
-    socklen_t server_len = sizeof(server_addr);
 
     // Create UDP socket
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
