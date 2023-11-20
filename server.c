@@ -5,33 +5,45 @@
 #include <getopt.h>
 #include <time.h>
 #include <arpa/inet.h> 
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <stdbool.h>
 
 #define DEFAULT_PORT 69
 #define MAX_BUFFER_SIZE 516
 #define TIMEOUT_SECONDS 3
 
-
-void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int opcode, int block_id) {
+void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int block_id, char* buffer, const char *opts) {
     char src_ip[INET_ADDRSTRLEN];
     char dst_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(src_addr->sin_addr), src_ip, INET_ADDRSTRLEN);
-    
+
     // Get the source and destination ports
     int src_port = ntohs(src_addr->sin_port);
     int dst_port = (dst_addr != NULL) ? ntohs(dst_addr->sin_port) : -1;
 
+    unsigned short opcode = ntohs(*(unsigned short *)buffer);
+    char *filename = buffer + 2;  // Skip opcode
+    char *mode = filename + strlen(filename) + 1;  // Skip filename
+
     switch (opcode) {
-        case 3:
+        case 1:  // RRQ
+        case 2:  // WRQ
+            fprintf(stderr, "%s %s:%d \"%s\" %s %s\n", (opcode == 1) ? "RRQ" : "WRQ", src_ip, src_port, filename, mode, opts);
+            break;
+        case 3:  // DATA
             fprintf(stderr, "DATA %s:%d:%d %d\n", src_ip, src_port, dst_port, block_id);
             break;
-        case 4:
+        case 4:  // ACK
             fprintf(stderr, "ACK %s:%d %d\n", src_ip, src_port, block_id);
             break;
-        case 5:
-            fprintf(stderr, "ERROR %s:%d:%d %d \"%s\"\n", src_ip, src_port, dst_port, block_id, "Error Message");
+        case 5:  // ERROR
+            fprintf(stderr, "ERROR %s:%d:%d \"%s\"\n", src_ip, src_port, dst_port, buffer+4);
             break;
-        default:
-            fprintf(stderr, "Unknown opcode %d\n", opcode);
+        case 6:  // OACK
+            fprintf(stderr, "OACK %s:%d %s\n", src_ip, src_port, opts);
+            break;
     }
 }
 
@@ -80,7 +92,7 @@ int get_data_block(char* buffer, int block_number, char* filename) {
     return bytesRead + 4;
 }
 
-int recive_ack(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in server_addr, int block_number){
+int recive_ack(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in server_addr, int block_number, int* cnt, int timeout){
     socklen_t client_len = sizeof(client_addr);
     char ack_buffer[MAX_BUFFER_SIZE];
     ssize_t ack_size;
@@ -89,8 +101,9 @@ int recive_ack(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in se
     while (1) {
         // Check if the timeout has occurred
         current_time = time(NULL);
-        if (current_time - start_time >= TIMEOUT_SECONDS) {
+        if (current_time - start_time >= timeout) {
             printf("Timeout occurred. No ACK received.\n");
+            (*cnt)++;
             return -1;  // Timeout occurred
         }
 
@@ -100,14 +113,14 @@ int recive_ack(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in se
 
         if (ack_size > 0) {
             unsigned short opcode = ntohs(*(unsigned short *)ack_buffer);
-            print_message(&client_addr, &server_addr, opcode, block_number);
+            print_message(&client_addr, &server_addr, block_number, ack_buffer, "opts");
             if (opcode == 4) {
                 // Check if ACK packet is correct
                 unsigned short received_block_number = ntohs(*(unsigned short *)(ack_buffer + 2));
                 if (received_block_number == block_number) {
                     printf("Block number is correct = %d\n", block_number);
                     // ACK is correct, return 0
-                    //(*cnt) == 0;
+                    (*cnt) == 0;
                     return 0;
                 } else if (opcode == 5) {
                     printf("Error package has arrived");
@@ -127,7 +140,7 @@ int recive_ack(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in se
     }
 }
 
-void handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
+int handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool mode) {
 
     char buffer[MAX_BUFFER_SIZE];
     memset(buffer, 0, sizeof(buffer));
@@ -139,86 +152,215 @@ void handle_rrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
     
     int bn = 1;
     int data_size = get_data_block(buffer, bn, filename);
-
-    printf("data sizr is %d\n",data_size);
+    int cnt = 0;
+    int result;
+    
     while(data_size) {
         sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-        while(recive_ack(sockfd, client_addr, server_addr, bn)!=0){
-           printf("Again\n");
-           sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+        while(result = recive_ack(sockfd, client_addr, server_addr, bn, &cnt, TIMEOUT_SECONDS)!=0){
+            if( cnt > 3 ) {
+                printf("Timeout has occurred, cannot recive ACK from server, terminate communication\n");
+                return 1;
+            }
+            if (result == 5)
+                return result;
+            sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
         }
         bn++;
         data_size = get_data_block(buffer, bn, filename);
     }
-    return;
+    return 0;
 }
 
-void handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename) {
-    
-    struct sockaddr_in server_addr;
-    socklen_t server_len = sizeof(server_addr);
+int set_data_block(int sockfd, struct sockaddr_in client_addr, char* buffer, int block_number, const char* filename, size_t len) {
+    printf("filename is %s\n", filename);
 
-    getsockname(sockfd, (struct sockaddr *)&server_addr, &server_len);
+    FILE *file = fopen(filename, "r+b");  // Try to open the file for reading and writing
 
-    FILE *file = fopen(filename, "wb");
     if (file == NULL) {
-        send_error(sockfd, client_addr, 2, "Access violation");
-        return;
+        // The file does not exist, create a new file
+        file = fopen(filename, "w+b");  // Create a new file in write mode
+
+        if (file == NULL) {
+            send_error(sockfd, client_addr, 2, "Access violation");
+            return 1;
+        }
     }
 
+    size_t block_size = 512;
+    size_t position = (block_number - 1) * block_size;
+    printf("postition is %ld\n", position);
+
+    // Move the file pointer to the appropriate position
+    fseek(file, position, SEEK_SET);
+    printf("stlen: %ld\n",strlen(buffer + 4));
+    size_t bytesWritten = fwrite(buffer + 4, 1, len-4, file);
+
+    if (bytesWritten != len-4) {
+        printf("Error writing data to file");
+    } else {
+        printf("Data block %d written to file\n", block_number);
+    }
+
+    fclose(file);
+    return 0;
+}
+
+void netascii_to_local(char *data, size_t* length) {
+    for (size_t i = 0; i < (*length); ++i) {
+        // Check for CR LF sequence
+        if (data[i] == '\r' && i + 1 < (*length) && data[i + 1] == '\n') {
+            // Replace CR LF with LF
+            data[i] = '\n';
+
+            // Shift remaining characters to the left
+            memmove(&data[i + 1], &data[i + 2], (*length) - i - 2);
+
+            // Decrease the length
+            --(*length);
+        }
+    }
+}
+
+int receive_data(int sockfd, struct sockaddr_in client_addr, struct sockaddr_in server_addr, const char* filepath, int block_number, int* cnt, int timeout, bool mode) {
+    socklen_t clinet_len = sizeof(client_addr);
+    char buffer[MAX_BUFFER_SIZE];
+    ssize_t bytes_received;
+    time_t start_time = time(NULL);
+    time_t current_time;
+
+    while(1) {
+        // Receive data packet
+        current_time = time(NULL);
+        if (current_time - start_time >= timeout) {
+            printf("Timeout occurred. No DATA received.\n");
+            (*cnt)++; 
+            return 2;  // Timeout occurred
+        }
+
+        bytes_received = recvfrom(sockfd, buffer, sizeof(buffer), MSG_DONTWAIT, (struct sockaddr *)&client_addr, &clinet_len);
+        
+        if (bytes_received > 0) {
+            unsigned short opcode = ntohs(*(unsigned short *)buffer);
+            print_message(&client_addr, &server_addr, block_number, buffer, "opts");
+            if (opcode != 3) {
+                if (opcode == 5) {
+                    printf("Error package has arrived\n");
+                    return 5;
+                }
+                printf("Received packet is not a data packet (opcode != 3)\n");
+                return 2;
+            }
+            
+            if (mode)
+            {
+                netascii_to_local(buffer, &bytes_received);
+            }
+            
+            // Check block number
+            unsigned short received_block_number = ntohs(*(unsigned short *)(buffer + 2));
+            if (received_block_number != block_number) {
+                printf("Received unexpected block number: %d\n", received_block_number);
+                return 2;
+            }
+            set_data_block(sockfd, client_addr, buffer, block_number, filepath, bytes_received);
+            (*cnt) == 0;
+            if(bytes_received < MAX_BUFFER_SIZE) {
+                return 1;
+            } else {
+                return 0;
+            }
+        }
+        usleep(100000);
+    }
+}
+
+int handle_wrq(int sockfd, struct sockaddr_in client_addr, char *filename, bool mode) {
     // Send acknowledgment for the initial request
     char ack_packet[4] = {0, 4, 0, 0};
     sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-    printf("ack is sent\n");
-    // Receive data and write to the file
-    unsigned short block_number = 1;
-    char buffer[MAX_BUFFER_SIZE];
-    size_t bytes_received;
 
-    do {
-        printf("i am here\n");
-        // Receive data packet
-        bytes_received = recvfrom(sockfd, buffer, sizeof(buffer), 0, NULL, NULL);
-        if (bytes_received < 0) {
-            perror("Error receiving data");
-            break;
+    struct sockaddr_in local_addr;
+    socklen_t local_len = sizeof(local_addr);
+    getsockname(sockfd, (struct sockaddr*)&local_addr, &local_len);
+    
+    int bn = 1;
+    int cnt = 0;
+    int received_data;
+
+    while(1) {
+        if( cnt > 3 ) {
+            printf("Timeout has occurred, can not recive DATA from server, terminate communication\n");
+            return 1;
         }
-        
-        // Check opcode
-        unsigned short opcode = ntohs(*(unsigned short *)buffer);
-        if (opcode != 3) {
-            printf("Illegal TFTP operation opcode is != 3\n");
-            send_error(sockfd, client_addr, 4, "Illegal TFTP operation");
+        received_data = receive_data(sockfd, client_addr, local_addr, filename, bn, &cnt, TIMEOUT_SECONDS, mode);
+        if (received_data == 0){ // okay, send next
+            ack_packet[2] = (bn >> 8) & 0xFF;
+            ack_packet[3] = bn & 0xFF;
+            sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+            bn++;
+        } else if (received_data == 1) { // last packet recieved
+            ack_packet[2] = (bn >> 8) & 0xFF;
+            ack_packet[3] = bn & 0xFF;
+            sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+            return 0;
+        } else if (received_data == 2){ // error in data reciving step
+            sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+        } 
+    }
+
+}
+
+int handle_queries(int child_sockfd, struct sockaddr_in client_addr, char buffer[512], const char* dir) {
+
+    struct sockaddr_in server_addr;
+    socklen_t server_len = sizeof(server_addr);
+
+    getsockname(child_sockfd, (struct sockaddr *)&server_addr, &server_len);
+
+    unsigned short opcode = ntohs(*(unsigned short *)buffer);
+    char *filename = buffer + 2;  // Skip opcode
+    char *mode = filename + strlen(filename) + 1;  // Skip filename
+
+    print_message(&client_addr, &server_addr, 0, buffer, "opts");
+
+    bool mode_flag;
+
+    if (strcmp(mode, "netascii") == 0) {
+        mode_flag = true;
+    } else if (strcmp(mode, "octet") == 0) {
+        mode_flag = false;
+    } else { 
+        send_error(child_sockfd, client_addr, 0, "Unsupported mode\n");
+        return 1;
+    }
+
+    char filepath[512];
+    snprintf(filepath, sizeof(filepath), "%s/%s", dir, filename);
+    printf("filepath: %s\n", filepath);
+
+    switch (opcode) {
+        case 1:  // RRQ
+            if (access(filepath, F_OK) == -1) {
+                printf("Error, file do not exist: %s\n", filepath);
+                send_error(child_sockfd, client_addr, 2, "File do not exists");
+                return 1;
+            }
+            handle_rrq(child_sockfd, client_addr, filepath, mode_flag);
             break;
-        }
-
-        // Check block number
-        unsigned short received_block_number = ntohs(*(unsigned short *)(buffer + 2));
-        if (received_block_number != block_number) {
-            printf("Illegal TFTP operation opcode is block numbers are different\n");
-            send_error(sockfd, client_addr, 4, "Illegal TFTP operation");
+        case 2:  // WRQ
+            if (access(filepath, F_OK) == 0) {
+                printf("Error, file exists: %s\n", filepath);
+                send_error(child_sockfd, client_addr, 6, "File already exists");
+                return 1;
+            }
+            handle_wrq(child_sockfd, client_addr, filepath, mode_flag);
             break;
-        }
-        // printf("Received Data:\n");
-        // for (size_t i = 0; i < bytes_received; ++i) {
-        //     printf("%02X ", (unsigned char)buffer[i]);
-        // }
-        // printf("\n");
-
-        // Write data to the file
-        fwrite(buffer + 4, 1, bytes_received - 4, file);
-
-
-        // Send acknowledgment
-        ack_packet[2] = (block_number >> 8) & 0xFF;
-        ack_packet[3] = block_number & 0xFF;
-        sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-        block_number++;
-    } while (bytes_received == MAX_BUFFER_SIZE);
-
-    //Close the file
-    fclose(file);
-    return;
+        default:
+            send_error(child_sockfd, client_addr, 0,"Unsupported package");
+            return 1;
+            break;
+    }
 }
 
 int bind_child_socket(int *child_sockfd, int parent_sockfd) {
@@ -256,7 +398,7 @@ int bind_child_socket(int *child_sockfd, int parent_sockfd) {
     return 0;
 }
 
-int run_server(int port) {
+int run_server(int port, const char* dir) {
     int sockfd;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
@@ -301,30 +443,10 @@ int run_server(int port) {
             // This is the child process
             int child_sockfd;
             if (bind_child_socket(&child_sockfd, sockfd) == 0) {
-
-                // Handle the TFTP request using child_sockfd
-                // Parse TFTP request
-                unsigned short opcode = ntohs(*(unsigned short *)buffer);
-                char *filename = buffer + 2;  // Skip opcode
-                char *mode = filename + strlen(filename) + 1;  // Skip filename
-
                 // Handle TFTP request based on opcode
-                switch (opcode) {
-                    case 1:  // RRQ
-                        printf("rrq parsed\n");
-                        handle_rrq(child_sockfd, client_addr, filename);
-                        break;
-                    case 2:  // WRQ
-                        printf("wrq parsed\n");
-                        printf("filename is %s\n",filename);
-                        handle_wrq(child_sockfd, client_addr, filename);
-                        break;
-                    default:
-                        fprintf(stderr, "Unsupported TFTP opcode: %d\n", opcode);
-                        exit(EXIT_FAILURE);
-                        break;
-                }
+                handle_queries(child_sockfd, client_addr, buffer, dir);
                 // Exit the child process
+                close(child_sockfd);
                 exit(EXIT_SUCCESS);
             } else {
                 // Handle error in creating and binding the child socket
@@ -372,7 +494,17 @@ int main(int argc, char *argv[]) {
     printf("Port: %d\n", port);
     printf("Root Directory Path: %s\n", root_dirpath);
 
-    run_server(port);
+    const char* root_dirpath_const = root_dirpath;
 
+    DIR *dir = opendir(root_dirpath);
+    if (dir == NULL) {
+        if (mkdir(root_dirpath, 0777) == 0) {
+            printf("Success\n"); // Directory created successfully
+        } else {
+            printf("Error creating directory\n");
+            return -1; // Error creating directory
+        }
+    }
+    run_server(port, root_dirpath_const);
     return 0;
 }

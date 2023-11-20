@@ -12,7 +12,7 @@
 #define MAX_BUFFER_SIZE 516
 #define TIMEOUT_SECONDS 5
 
-void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int opcode, int block_id) {
+void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr, int opcode, int block_id, char* e_msg) {
     char src_ip[INET_ADDRSTRLEN];
     char dst_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(src_addr->sin_addr), src_ip, INET_ADDRSTRLEN);
@@ -29,7 +29,7 @@ void print_message(const struct sockaddr_in *src_addr, const struct sockaddr_in 
             fprintf(stderr, "ACK %s:%d %d\n", src_ip, src_port, block_id);
             break;
         case 5:
-            fprintf(stderr, "ERROR %s:%d:%d %d \"%s\"\n", src_ip, src_port, dst_port, block_id, "Error Message");
+            fprintf(stderr, "ERROR %s:%d:%d \"%s\"\n", src_ip, src_port, dst_port, e_msg+4);
             break;
         default:
             fprintf(stderr, "Unknown opcode %d\n", opcode);
@@ -91,10 +91,10 @@ int receive_data(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in
         //printf("bytes recived: %ld\n", bytes_received);
         if (bytes_received > 0) {
             unsigned short opcode = ntohs(*(unsigned short *)buffer);
-            print_message(server_addr, &local_addr, opcode, block_number);
+            print_message(server_addr, &local_addr, opcode, block_number, buffer);
             if (opcode != 3) {
                 if (opcode == 5) {
-                    printf("Error package has arrived");
+                    printf("Error package has arrived\n");
                     return 5;
                 }
                 printf("Received packet is not a data packet (opcode != 3)\n");
@@ -150,7 +150,7 @@ int recive_ack(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in l
         if (ack_size > 0) {
             // Check if the received packet is an ACK
             unsigned short opcode = ntohs(*(unsigned short *)ack_buffer);
-            print_message(server_addr, &local_addr, opcode, block_number);
+            print_message(server_addr, &local_addr, opcode, block_number, ack_buffer);
             if (opcode == 4) {
                 // Check if ACK packet is correct
                 unsigned short received_block_number = ntohs(*(unsigned short *)(ack_buffer + 2));
@@ -159,13 +159,13 @@ int recive_ack(int sockfd, struct sockaddr_in *server_addr, struct sockaddr_in l
                     // ACK is correct, return 0
                     (*cnt) == 0;
                     return 0;
-                } else if (opcode == 5) {
-                    printf("Error package has arrived");
-                    return 5;
                 } else {
                     // Incorrect ACK, continue waiting for the correct one
                     printf("Block number is not correct = %d %d\n", block_number, received_block_number);
                 }
+            } else if (opcode == 5) {
+                    printf("Error package has arrived\n");
+                    return 5;
             } else {
                 // The received packet is not an ACK, continue waiting
                 printf("Received packet is not an ACK (opcode = %d)\n", opcode);
@@ -195,35 +195,31 @@ int send_rrq(int sockfd, struct sockaddr_in server_addr, const char *filename, c
     // Get local address in order to get dynamicly assigned port number
     struct sockaddr_in local_addr;
     socklen_t local_len = sizeof(local_addr);
-    if (getsockname(sockfd, (struct sockaddr*)&local_addr, &local_len) == 0) {
-        printf("Local port assigned: %d\n", ntohs(local_addr.sin_port));
-    } else {
-        printf("Error getting local port");
-    }
+    getsockname(sockfd, (struct sockaddr*)&local_addr, &local_len);
     int bn = 1;
     char ack_packet[4] = {0, 4, 0, 1};
     int cnt = 0;
     while(1) {
         if( cnt > 3 ) {
-            printf("Timeout has occurred, cannot recive DATA from server\n");
+            printf("Timeout has occurred, can not recive DATA from server, terminate commuication\n");
             return 1;
         }
         int received_data = receive_data(sockfd, &server_addr, local_addr, filename, bn, localpath, &cnt);
-        if (received_data == 0){
+        if (received_data == 0){ // okay, send next
             ack_packet[2] = (bn >> 8) & 0xFF;
             ack_packet[3] = bn & 0xFF;
             sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
             bn++;
-        } else if (received_data == 1) {
+        } else if (received_data == 1) { // last packet recieved
             ack_packet[2] = (bn >> 8) & 0xFF;
             ack_packet[3] = bn & 0xFF;
             sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
             return 0;
-        } else if (received_data == 2){
+        } else if (received_data == 2){ // error in data reciving stect
             sendto(sockfd, ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
-        } else if (received_data == 2 || bn == 1) {
+        } else if (received_data == 2 && bn == 1) { // error int rrq sending step
             sendto(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
-        } else if ( received_data == 5 ) {
+        } else if ( received_data == 5 ) { //error package 
             return received_data;
         }
     }
@@ -266,16 +262,12 @@ int send_wrq(int sockfd, struct sockaddr_in server_addr, const char *filename) {
     // Getting local address in order to get dynamicly assigned port number
     struct sockaddr_in local_addr;
     socklen_t local_len = sizeof(local_addr);
-    if (getsockname(sockfd, (struct sockaddr*)&local_addr, &local_len) == 0) {
-        printf("Local port assigned: %d\n", ntohs(local_addr.sin_port));
-    } else {
-        printf("Error getting local port");
-    }
+    getsockname(sockfd, (struct sockaddr*)&local_addr, &local_len);
     int result;
     int cnt = 0;
     while( (result = recive_ack(sockfd, &server_addr, local_addr, 0, &cnt)) != 0 ){
         if( cnt > 3 ) {
-            printf("Timeout has occurred, cannot recive ACK from server\n");
+            printf("Timeout has occurred, cannot recive ACK from server, terminate communication\n");
             return 1;
         }
         if (result == 5)
@@ -285,14 +277,13 @@ int send_wrq(int sockfd, struct sockaddr_in server_addr, const char *filename) {
 
     int bn = 1;
     int data_size = get_data_block(buffer, bn);
-    printf("data size is %d\n",data_size);
     while(data_size) {
         sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
         while(recive_ack(sockfd, &server_addr, local_addr, bn, &cnt)!=0){
-        if( cnt > 3 ) {
-            printf("Timeout has occurred, cannot recive ACK from server\n");
-            return 1;
-        }
+            if( cnt > 3 ) {
+                printf("Timeout has occurred, cannot recive ACK from server\n");
+                return 1;
+            }
            sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
         }
         bn++;
@@ -399,20 +390,9 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    // Print parsed arguments
-    printf("Hostname: %s\n", hostname);
-    printf("Port: %d\n", (port != -1) ? port : DEFAULT_PORT); // Assuming DEFAULT_PORT is a constant
-    printf("Filepath: %s\n", (filepath != NULL) ? filepath : "stdin");
-    printf("Dest Filepath: %s\n", dest_filepath);
-
-
     bool wrqflag;
     if (filepath == NULL) {
         wrqflag = true;
-        if (access(dest_filepath, F_OK) == -1) {
-            printf("Error, file do not exist: %s\n", dest_filepath);
-            exit(EXIT_FAILURE);
-        }
     } else {
         wrqflag = false;
         if (access(dest_filepath, F_OK) == 0) {
